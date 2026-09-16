@@ -1,0 +1,36 @@
+name: arms-hello
+
+# ARMS 告警通过 GitHub REST API 触发：
+# POST https://api.github.com/repos/hbf548/arms-alert/dispatches
+# body: {"event_type":"arms-alert","client_payload":{...}}
+on:
+  repository_dispatch:
+    types: [arms-alert]
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hello + print what ARMS sent
+        env:
+          # 用 env 传递外部输入，避免直接内插到 shell 造成注入
+          EVENT_TYPE: ${{ github.event.action }}
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          echo "hello world"
+          echo "----------------------------------------"
+          echo "event_type : $EVENT_TYPE"
+          echo "payload    :"
+          echo "$PAYLOAD"
+
+      - name: Write summary
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          {
+            echo "### ARMS dispatch received"
+            echo ""
+            echo '```json'
+            echo "$PAYLOAD"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
