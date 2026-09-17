@@ -110,3 +110,39 @@ jobs:
           print("过期时间 :", cred["Expiration"])
           print("扮演身份 :", resp["AssumedRoleUser"]["Arn"])
           PY
+
+      # 第三步：用临时凭证调 ARMS OpenAPI。用官方 SDK，它自动
+      # 处理 V3 签名和 SecurityToken，不用手写签名
+      - name: Query ARMS activated alerts
+        env:
+          ALI_REGION: cn-hangzhou
+        run: |
+          pip install -q alibabacloud_arms20190808 alibabacloud_tea_openapi
+          python3 - <<'PY'
+          import os
+          from alibabacloud_tea_openapi import models as open_api_models
+          from alibabacloud_arms20190808.client import Client
+          from alibabacloud_arms20190808 import models as arms_models
+
+          region = os.environ["ALI_REGION"]
+          config = open_api_models.Config(
+              access_key_id=os.environ["ALIBABA_CLOUD_ACCESSKEYID"],
+              access_key_secret=os.environ["ALIBABA_CLOUD_ACCESSKEYSECRET"],
+              # 临时凭证必须带 security_token，否则报 InvalidSecurityToken
+              security_token=os.environ["ALIBABA_CLOUD_SECURITYTOKEN"],
+              endpoint=f"arms.{region}.aliyuncs.com",
+          )
+          client = Client(config)
+
+          req = arms_models.ListActivatedAlertsRequest(
+              region_id=region,
+              current_page=1,
+              page_size=10,
+          )
+          resp = client.list_activated_alerts(req)
+          body = resp.body.to_map()
+
+          print("ARMS 调用成功，RequestId:", body.get("RequestId"))
+          # 返回结构因版本而异，先把顶层 key 打出来看清楚
+          print("顶层字段 :", list(body.keys()))
+          PY
