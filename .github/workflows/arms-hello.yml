@@ -6,10 +6,21 @@ name: arms-hello
 on:
   repository_dispatch:
     types: [arms-alert]
+  # 允许手动触发，方便单独调试 OIDC 换证，不用每次去 ARMS 造告警
+  workflow_dispatch:
+
+# id-token: write 是拿 GitHub OIDC 令牌的前提，缺了会导致
+# ACTIONS_ID_TOKEN_REQUEST_URL 为空
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   hello:
     runs-on: ubuntu-latest
+    env:
+      ALI_ROLE_ARN: acs:ram::1785488864396027:role/github-actions-arms-role
+      ALI_OIDC_PROVIDER_ARN: acs:ram::1785488864396027:oidc-provider/github-actions-oidc
     steps:
       - name: Hello + print what ARMS sent
         env:
@@ -34,3 +45,64 @@ jobs:
             echo "$PAYLOAD"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 第一步：向 GitHub 索取 OIDC 令牌（JWT），audience 必须和 RAM
+      # 身份提供商里的「客户端 ID」完全一致，否则 oidc:aud 条件不通过
+      - name: Get GitHub OIDC token
+        run: |
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.aliyuncs.com" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
+
+          # 令牌等同于临时身份凭证，先打掩码再写入 env，避免出现在日志里
+          echo "::add-mask::$TOKEN"
+          echo "OIDC_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+          # 只解 payload 段做自检，不含签名，安全
+          echo "$TOKEN" | cut -d. -f2 \
+            | python3 -c 'import sys,base64,json; s=sys.stdin.read().strip(); d=json.loads(base64.urlsafe_b64decode(s+"="*(-len(s)%4))); print("iss:",d["iss"]); print("aud:",d["aud"]); print("sub:",d["sub"])'
+
+      # 第二步：拿 JWT 换阿里云临时 AK/SK。AssumeRoleWithOIDC 是匿名接口，
+      # 不需要签名，身份完全由 OIDCToken 证明
+      - name: Exchange for Alibaba Cloud STS credentials
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.parse, urllib.request
+
+          body = urllib.parse.urlencode({
+              "Action": "AssumeRoleWithOIDC",
+              "Version": "2015-04-01",
+              "Format": "JSON",
+              "RoleArn": os.environ["ALI_ROLE_ARN"],
+              "OIDCProviderArn": os.environ["ALI_OIDC_PROVIDER_ARN"],
+              "OIDCToken": os.environ["OIDC_TOKEN"],
+              "RoleSessionName": "gh-actions-arms",
+              # 角色最大会话时间是 1 小时，不能超过 3600
+              "DurationSeconds": "3600",
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://sts.aliyuncs.com/",
+              data=body,
+              headers={"Content-Type": "application/x-www-form-urlencoded"},
+          )
+
+          try:
+              resp = json.load(urllib.request.urlopen(req, timeout=15))
+          except urllib.error.HTTPError as e:
+              # STS 的错误信息在响应体里，不打出来根本无法排查
+              print("STS 换证失败:", e.code)
+              print(e.read().decode())
+              raise SystemExit(1)
+
+          cred = resp["Credentials"]
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              for k in ("AccessKeyId", "AccessKeySecret", "SecurityToken"):
+                  print(f"::add-mask::{cred[k]}")
+                  f.write(f"ALIBABA_CLOUD_{k.upper()}={cred[k]}\n")
+
+          print("换证成功")
+          print("过期时间 :", cred["Expiration"])
+          print("扮演身份 :", resp["AssumedRoleUser"]["Arn"])
+          PY
