@@ -69,11 +69,15 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, urllib.error, urllib.parse, urllib.request
+          from datetime import datetime, timezone
 
           body = urllib.parse.urlencode({
               "Action": "AssumeRoleWithOIDC",
               "Version": "2015-04-01",
               "Format": "JSON",
+              # Timestamp 是 RPC 公共参数，即使免签名也必填，
+              # 必须是 UTC 的 ISO8601，否则报 MissingTimestamp
+              "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "RoleArn": os.environ["ALI_ROLE_ARN"],
               "OIDCProviderArn": os.environ["ALI_OIDC_PROVIDER_ARN"],
               "OIDCToken": os.environ["OIDC_TOKEN"],
